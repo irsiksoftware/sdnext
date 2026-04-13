@@ -1,7 +1,5 @@
 # pylint: disable=relative-beyond-top-level,redefined-builtin,protected-access
 
-from typing import Tuple
-
 import torch
 
 from ...common import compile_func # noqa: TID252
@@ -11,27 +9,28 @@ from ...dequantizer import quantize_fp_mm, dequantize_symmetric, dequantize_symm
 from .forward import check_mats
 
 
-def quantize_fp_mm_input_tensorwise(input: torch.FloatTensor, scale: torch.FloatTensor, matmul_dtype: str = "float8_e4m3fn") -> Tuple[torch.Tensor, torch.FloatTensor]:
-    input = input.flatten(0,-2).to(dtype=scale.dtype)
+def quantize_fp_mm_input_tensorwise(input: torch.FloatTensor, dtype: torch.dtype | None = None, matmul_dtype: str = "float8_e4m3fn") -> tuple[torch.Tensor, torch.FloatTensor]:
+    input = input.flatten(0,-2)
+    if dtype is not None:
+        input = input.to(dtype=dtype)
     input, input_scale = quantize_fp_mm(input, dim=-1, matmul_dtype=matmul_dtype)
-    scale = torch.mul(input_scale, scale)
-    if scale.dtype == torch.float16: # fp16 will overflow
-        scale = scale.to(dtype=torch.float32)
-    return input, scale
+    if input_scale.dtype == torch.float16: # fp16 will overflow
+        input_scale = input_scale.to(dtype=torch.float32)
+    return input, input_scale
 
 
 def fp8_matmul_tensorwise(
     input: torch.FloatTensor,
     weight: torch.Tensor,
     scale: torch.FloatTensor,
-    bias: torch.FloatTensor = None,
-    svd_up: torch.FloatTensor = None,
-    svd_down: torch.FloatTensor = None,
-    quantized_weight_shape: torch.Size = None,
-    weights_dtype: str = None,
+    bias: torch.FloatTensor | None = None,
+    svd_up: torch.FloatTensor | None = None,
+    svd_down: torch.FloatTensor | None = None,
+    quantized_weight_shape: torch.Size | None = None,
+    weights_dtype: str | None = None,
 ) -> torch.FloatTensor:
     if quantized_weight_shape is not None:
-        weight = unpack_float(weight, quantized_weight_shape, weights_dtype).to(dtype=torch.float8_e4m3fn).t_()
+        weight = unpack_float(weight, weights_dtype, quantized_weight_shape).to(dtype=torch.float8_e4m3fn).t_()
         scale = scale.t()
     return_dtype = input.dtype
     output_shape = (*input.shape[:-1], weight.shape[-1])
@@ -42,12 +41,12 @@ def fp8_matmul_tensorwise(
         else:
             bias = torch.mm(torch.mm(input.to(dtype=svd_down.dtype), svd_down), svd_up)
     dummy_input_scale = torch.ones(1, device=input.device, dtype=torch.float32)
-    input, scale = quantize_fp_mm_input_tensorwise(input, scale)
+    input, input_scale = quantize_fp_mm_input_tensorwise(input, dtype=scale.dtype)
     input, weight = check_mats(input, weight, allow_contiguous_mm=False)
     if bias is not None:
-        return dequantize_symmetric_with_bias(torch._scaled_mm(input, weight, scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=scale.dtype), scale, bias, dtype=return_dtype, result_shape=output_shape)
+        return dequantize_symmetric_with_bias(torch._scaled_mm(input, weight, scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=input_scale.dtype).to(dtype=input_scale.dtype).mul_(input_scale), scale, bias, dtype=return_dtype, result_shape=output_shape)
     else:
-        return dequantize_symmetric(torch._scaled_mm(input, weight, scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=scale.dtype), scale, dtype=return_dtype, result_shape=output_shape)
+        return dequantize_symmetric(torch._scaled_mm(input, weight, scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=input_scale.dtype).to(dtype=input_scale.dtype).mul_(input_scale), scale, dtype=return_dtype, result_shape=output_shape)
 
 
 def quantized_linear_forward_fp8_matmul_tensorwise(self, input: torch.FloatTensor) -> torch.FloatTensor:

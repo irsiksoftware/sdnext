@@ -1,7 +1,5 @@
 # pylint: disable=relative-beyond-top-level,redefined-builtin,protected-access
 
-from typing import List
-
 import torch
 
 from ...common import compile_func, fp_mm_func # noqa: TID252
@@ -18,15 +16,15 @@ def conv_fp16_matmul(
     weight: torch.Tensor,
     scale: torch.FloatTensor,
     result_shape: torch.Size,
-    reversed_padding_repeated_twice: List[int],
+    reversed_padding_repeated_twice: list[int],
     padding_mode: str, conv_type: int,
-    groups: int, stride: List[int],
-    padding: List[int], dilation: List[int],
-    bias: torch.FloatTensor = None,
-    svd_up: torch.FloatTensor = None,
-    svd_down: torch.FloatTensor = None,
-    quantized_weight_shape: torch.Size = None,
-    weights_dtype: str = None,
+    groups: int, stride: list[int],
+    padding: list[int], dilation: list[int],
+    bias: torch.FloatTensor | None = None,
+    svd_up: torch.FloatTensor | None = None,
+    svd_down: torch.FloatTensor | None = None,
+    quantized_weight_shape: torch.Size | None = None,
+    weights_dtype: str | None = None,
 ) -> torch.FloatTensor:
     return_dtype = input.dtype
     input, mm_output_shape = process_conv_input(conv_type, input, reversed_padding_repeated_twice, padding_mode, result_shape, stride, padding, dilation)
@@ -38,22 +36,22 @@ def conv_fp16_matmul(
             bias = torch.mm(torch.mm(input.to(dtype=svd_down.dtype), svd_down), svd_up)
 
     if quantized_weight_shape is not None:
-        weight = unpack_float(weight, quantized_weight_shape, weights_dtype).to(dtype=torch.float16).t_()
+        weight = unpack_float(weight, weights_dtype, quantized_weight_shape).to(dtype=torch.float16).t_()
         scale = scale.t()
     elif weight.dtype != torch.float16:
         weight = weight.to(dtype=torch.float16) # fp8 weights
-    input, scale = quantize_fp_mm_input_tensorwise(input, scale, matmul_dtype="float16")
+    input, input_scale = quantize_fp_mm_input_tensorwise(input, dtype=scale.dtype, matmul_dtype="float16")
     input, weight = check_mats(input, weight)
 
     if groups == 1:
-        result = fp_mm_func(input, weight)
+        result = fp_mm_func(input, weight).to(dtype=input_scale.dtype).mul_(input_scale)
     else:
         weight = weight.view(weight.shape[0], groups, weight.shape[1] // groups)
         input = input.view(input.shape[0], groups, input.shape[1] // groups)
         result = []
         for i in range(groups):
             result.append(fp_mm_func(input[:, i], weight[:, i]))
-        result = torch.cat(result, dim=-1)
+        result = torch.cat(result, dim=-1).to(dtype=input_scale.dtype).mul_(input_scale)
     if bias is not None:
         dequantize_symmetric_with_bias(result, scale, bias, dtype=return_dtype, result_shape=mm_output_shape)
     else:

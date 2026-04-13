@@ -14,14 +14,14 @@ def fp16_matmul(
     input: torch.FloatTensor,
     weight: torch.Tensor,
     scale: torch.FloatTensor,
-    bias: torch.FloatTensor = None,
-    svd_up: torch.FloatTensor = None,
-    svd_down: torch.FloatTensor = None,
-    quantized_weight_shape: torch.Size = None,
-    weights_dtype: str = None,
+    bias: torch.FloatTensor | None = None,
+    svd_up: torch.FloatTensor | None = None,
+    svd_down: torch.FloatTensor | None = None,
+    quantized_weight_shape: torch.Size | None = None,
+    weights_dtype: str | None = None,
 ) -> torch.FloatTensor:
     if quantized_weight_shape is not None:
-        weight = unpack_float(weight, quantized_weight_shape, weights_dtype).to(dtype=torch.float16).t_()
+        weight = unpack_float(weight, weights_dtype, quantized_weight_shape).to(dtype=torch.float16).t_()
         scale = scale.t()
     elif weight.dtype != torch.float16:
         weight = weight.to(dtype=torch.float16) # fp8 weights
@@ -33,12 +33,12 @@ def fp16_matmul(
             bias = torch.addmm(bias.to(dtype=svd_down.dtype), torch.mm(input.to(dtype=svd_down.dtype), svd_down), svd_up)
         else:
             bias = torch.mm(torch.mm(input.to(dtype=svd_down.dtype), svd_down), svd_up)
-    input, scale = quantize_fp_mm_input_tensorwise(input, scale, matmul_dtype="float16")
+    input, input_scale = quantize_fp_mm_input_tensorwise(input, dtype=scale.dtype, matmul_dtype="float16")
     input, weight = check_mats(input, weight)
     if bias is not None:
-        return dequantize_symmetric_with_bias(fp_mm_func(input, weight), scale, bias, dtype=return_dtype, result_shape=output_shape)
+        return dequantize_symmetric_with_bias(fp_mm_func(input, weight).to(dtype=input_scale.dtype).mul_(input_scale), scale, bias, dtype=return_dtype, result_shape=output_shape)
     else:
-        return dequantize_symmetric(fp_mm_func(input, weight), scale, dtype=return_dtype, result_shape=output_shape)
+        return dequantize_symmetric(fp_mm_func(input, weight).to(dtype=input_scale.dtype).mul_(input_scale), scale, dtype=return_dtype, result_shape=output_shape)
 
 
 def quantized_linear_forward_fp16_matmul(self, input: torch.FloatTensor) -> torch.FloatTensor:

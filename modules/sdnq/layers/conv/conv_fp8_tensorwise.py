@@ -1,7 +1,5 @@
 # pylint: disable=relative-beyond-top-level,redefined-builtin,protected-access
 
-from typing import List
-
 import torch
 
 from ...common import compile_func # noqa: TID252
@@ -18,15 +16,15 @@ def conv_fp8_matmul_tensorwise(
     weight: torch.Tensor,
     scale: torch.FloatTensor,
     result_shape: torch.Size,
-    reversed_padding_repeated_twice: List[int],
+    reversed_padding_repeated_twice: list[int],
     padding_mode: str, conv_type: int,
-    groups: int, stride: List[int],
-    padding: List[int], dilation: List[int],
-    bias: torch.FloatTensor = None,
-    svd_up: torch.FloatTensor = None,
-    svd_down: torch.FloatTensor = None,
-    quantized_weight_shape: torch.Size = None,
-    weights_dtype: str = None,
+    groups: int, stride: list[int],
+    padding: list[int], dilation: list[int],
+    bias: torch.FloatTensor | None = None,
+    svd_up: torch.FloatTensor | None = None,
+    svd_down: torch.FloatTensor | None = None,
+    quantized_weight_shape: torch.Size | None = None,
+    weights_dtype: str | None = None,
 ) -> torch.FloatTensor:
     return_dtype = input.dtype
     input, mm_output_shape = process_conv_input(conv_type, input, reversed_padding_repeated_twice, padding_mode, result_shape, stride, padding, dilation)
@@ -38,21 +36,21 @@ def conv_fp8_matmul_tensorwise(
             bias = torch.mm(torch.mm(input.to(dtype=svd_down.dtype), svd_down), svd_up)
 
     if quantized_weight_shape is not None:
-        weight = unpack_float(weight, quantized_weight_shape, weights_dtype).to(dtype=torch.float8_e4m3fn).t_()
+        weight = unpack_float(weight, weights_dtype, quantized_weight_shape).to(dtype=torch.float8_e4m3fn).t_()
         scale = scale.t()
-    input, scale = quantize_fp_mm_input_tensorwise(input, scale)
+    input, input_scale = quantize_fp_mm_input_tensorwise(input, dtype=scale.dtype)
     input, weight = check_mats(input, weight)
     dummy_input_scale = torch.ones(1, device=input.device, dtype=torch.float32)
 
     if groups == 1:
-        result = torch._scaled_mm(input, weight, scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=scale.dtype)
+        result = torch._scaled_mm(input, weight, scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=input_scale.dtype).mul_(input_scale)
     else:
         weight = weight.view(weight.shape[0], groups, weight.shape[1] // groups)
         input = input.view(input.shape[0], groups, input.shape[1] // groups)
         result = []
         for i in range(groups):
-            result.append(torch._scaled_mm(input[:, i], weight[:, i], scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=scale.dtype))
-        result = torch.cat(result, dim=-1)
+            result.append(torch._scaled_mm(input[:, i], weight[:, i], scale_a=dummy_input_scale, scale_b=dummy_input_scale, bias=None, out_dtype=input_scale.dtype))
+        result = torch.cat(result, dim=-1).mul_(input_scale)
     if bias is not None:
         dequantize_symmetric_with_bias(result, scale, bias, dtype=return_dtype, result_shape=mm_output_shape)
     else:
